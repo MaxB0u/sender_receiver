@@ -8,10 +8,13 @@ fn main() {
         std::process::exit(1);
     }
 
+    let pps = sender_receiver::get_env_var_f64("PPS").expect("Could not get PPS environment variable");
+    let flow_num = sender_receiver::get_env_var_f64("FLOW").expect("Could not get FLOW environment variable");
+
     let output = args.pop().unwrap_or_default();
     let input = args.pop().unwrap_or_default();
 
-    if let Err(e) = sender_receiver::run(input, output) {
+    if let Err(e) = sender_receiver::run(input, output, pps, flow_num as u8) {
         eprintln!("Application error: {e}");
         std::process::exit(1);
     }

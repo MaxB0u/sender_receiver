@@ -6,24 +6,24 @@ use pnet::packet::ethernet;
 use pnet::util::MacAddr;
 use rand::prelude::*;
 use std::time::{Duration, Instant};
+use std::env;
 
-const NUM_PACKETS: f64 = 1e6;
+const NUM_PACKETS: f64 = 1e1;
 const MIN_ETH_LEN: i32 = 64;
 const MTU: usize = 1500;
+const IP_HEADER_LEN: usize = 20;
 const EMPTY_PKT: [u8; MTU] = [0; MTU];
-const PACKETS_PER_SECOND: f64 = 0.8e4;
+//const PACKETS_PER_SECOND: f64 = 0.8e4;
 const SAFETY_BUFFER: f64 = 0.0;
 const NUM_SEC_BW_UPDATES: f64 = 1.0;
 const ETH_HDR_LEN: usize = 14;
-// Time in ns
-const SLEEP_TIME: u64 = 4000;  //4500 no queues but slow
 
 struct ChannelCustom {
     tx: Box<dyn datalink::DataLinkSender>,
     rx: Box<dyn datalink::DataLinkReceiver>,
 }
 
-pub fn run(input: String, output: String) -> Result<(), Box<dyn Error>> {
+pub fn run(input: String, output: String, pps: f64, flow: u8) -> Result<(), Box<dyn Error>> {
     println!("Sending Ethernet frames on interface {}...", input);
     println!("Receiving Ethernet frames on interface {}...", output);
 
@@ -45,7 +45,7 @@ pub fn run(input: String, output: String) -> Result<(), Box<dyn Error>> {
             }
         }
 
-        send(&input, sender);
+        send(&input, sender, pps, flow);
     });
 
     // Spawn thread for receiving packets
@@ -58,7 +58,7 @@ pub fn run(input: String, output: String) -> Result<(), Box<dyn Error>> {
             }
         }
 
-        receive(&output, receiver);
+        receive(&output, receiver, pps, flow);
     });
 
     send_handle.join().expect("Sending thread panicked");
@@ -92,25 +92,26 @@ fn get_channel(interface_name: &str) -> Result<ChannelCustom, &'static str>{
     Ok(ch)
 }
 
-fn send(input: &str, sender: Sender<i64>) {
+fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8) {
     let mut ch_tx = match get_channel(input) {
         Ok(tx) => tx,
         Err(error) => panic!("Error getting channel: {error}"),
     };
 
-    let mut packets = get_eth_frames();
+    //let mut packets = get_eth_frames();
     //let packets = get_perfect_frames(vec![64,751]);
     let mut i = 0;
     let mut count = 0;
 
-    //let interval = Duration::from_micros((1e6/PACKETS_PER_SECOND) as u64);
-    let interval = Duration::from_nanos((1e9/PACKETS_PER_SECOND + SAFETY_BUFFER) as u64);
+    //let interval = Duration::from_micros((1e6/pps) as u64);
+    let interval = Duration::from_nanos((1e9/pps + SAFETY_BUFFER) as u64);
     //let interval = Duration::from_nanos(SLEEP_TIME);
     let mut last_iteration_time = Instant::now();
-    let mut last_msg_time = Instant::now();
+    // let mut last_msg_time = Instant::now();
 
     loop {
-        let frame = &mut packets[i];
+    //for _ in (0..NUM_PACKETS as usize) {
+        let frame = &mut get_eth_frame(flow);
         encode_sequence_num(  frame, count);
         match ch_tx.tx.send_to(frame, None) {
             Some(res) => {
@@ -124,10 +125,13 @@ fn send(input: &str, sender: Sender<i64>) {
             }
         }
         i = (i+1) % NUM_PACKETS as usize;
-        if count % (PACKETS_PER_SECOND * NUM_SEC_BW_UPDATES) as i64 == 0 {
+        if count % (pps * NUM_SEC_BW_UPDATES) as i64 == 0 {
+            // let seq = decode_sequence_num(frame);
+            // println!("Sending {} of length {}", seq, frame.len());
+
             sender.send(count).unwrap();
             //println!("Sent {} packets in {:?}", count, last_msg_time.elapsed()); 
-            last_msg_time = Instant::now();
+            // last_msg_time = Instant::now();
         }
         count += 1;
 
@@ -144,7 +148,7 @@ fn send(input: &str, sender: Sender<i64>) {
     }
 }
 
-fn receive(output: &str, receiver: Receiver<i64>) {
+fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8) {
     let mut ch_rx = match get_channel(output) {
         Ok(rx) => rx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -160,14 +164,18 @@ fn receive(output: &str, receiver: Receiver<i64>) {
         match ch_rx.rx.next() {
             // process_packet(packet, &mut scheduler),
             Ok(pkt) =>  {
-                let seq = decode_sequence_num(pkt);
-                total_seq_mismatch += seq - count;
-                if seq - count > max_seq_mismatch {
-                    max_seq_mismatch = seq - count;
-                } else if seq - count < min_seq_mismatch {
-                    min_seq_mismatch = seq - count;
+                if is_dst_addr_matching(pkt, flow) { 
+                    let seq = decode_sequence_num(pkt);
+                    //println!("{seq}");
+                    total_seq_mismatch += seq - count;
+                    if seq - count > max_seq_mismatch {
+                        max_seq_mismatch = seq - count;
+                    } else if seq - count < min_seq_mismatch {
+                        min_seq_mismatch = seq - count;
+                    }
+                    count += 1;
                 }
-                count += 1;
+               
             },
             Err(e) => {
                 eprintln!("Error receiving frame: {}", e);
@@ -175,7 +183,7 @@ fn receive(output: &str, receiver: Receiver<i64>) {
             }
         };
 
-        if count % PACKETS_PER_SECOND as i64 == 0 {
+        if count % pps as i64 == 0 {
             //println!("Received {} in {:?}", count, last_msg_time.elapsed());
             last_msg_time = Instant::now();
         }
@@ -183,11 +191,16 @@ fn receive(output: &str, receiver: Receiver<i64>) {
         match receiver.try_recv() {
             Ok(num_pkts) => {
                 let latency_ratio = (num_pkts as f64 - count as f64) / num_pkts as f64;
-                let latency_time = last_msg_time.elapsed().as_nanos() as f64 * (latency_ratio / (PACKETS_PER_SECOND * NUM_SEC_BW_UPDATES));
-                let latency_total = 1e3 * (num_pkts as f64 - count as f64) / (PACKETS_PER_SECOND * NUM_SEC_BW_UPDATES);
+                let latency_time = last_msg_time.elapsed().as_nanos() as f64 * (latency_ratio / (pps * NUM_SEC_BW_UPDATES));
+                let latency_total = 1e3 * (num_pkts as f64 - count as f64) / (pps * NUM_SEC_BW_UPDATES);
+                let mut avg_reorder = 0;
+                if count > 0 {
+                    avg_reorder = total_seq_mismatch/count;
+                }
+
                 last_msg_time = Instant::now();
                 println!("Latency in received packets of {:.2}% or {:.0}ns, total {:.4}ms", 100.0 * latency_ratio, latency_time, latency_total);
-                println!("Average reordering of {} packets, max of {} and min of {}", total_seq_mismatch/count, max_seq_mismatch, min_seq_mismatch);
+                println!("Average reordering of {}, max of {} and min of {}, received {} packets", avg_reorder, max_seq_mismatch, min_seq_mismatch, count);
             },
             _ => continue,
         }
@@ -195,46 +208,59 @@ fn receive(output: &str, receiver: Receiver<i64>) {
     }
 }
 
-fn get_eth_frames() -> Vec<Vec<u8>>{
+fn get_eth_frame(flow: u8) -> Vec<u8> {
+    let dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, flow);
     let src_mac = MacAddr::new(0x05, 0x04, 0x03, 0x02, 0x01, 0x00);
-    let dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, 0x05);
-    let mut frame_buff: Vec<Vec<u8>> = Vec::new();
-    for _ in 0..NUM_PACKETS as i32 {
-        let length = get_random_pkt_len() as usize;
-        let mut eth_buff = EMPTY_PKT[0..length].to_vec();
-        let mut eth_pkt = ethernet::MutableEthernetPacket::new(&mut eth_buff).unwrap();
-        eth_pkt.set_source(src_mac);
-        eth_pkt.set_destination(dst_mac);
-        eth_pkt.set_ethertype(ethernet::EtherType::new(length as u16));
+    let length = get_random_pkt_len() as usize;
+    let mut eth_buff = EMPTY_PKT[0..length].to_vec();
+    let mut eth_pkt = ethernet::MutableEthernetPacket::new(&mut eth_buff).unwrap();
+    eth_pkt.set_source(src_mac);
+    eth_pkt.set_destination(dst_mac);
+    eth_pkt.set_ethertype(ethernet::EtherType::new(length as u16));
 
-        frame_buff.push(eth_buff);
-    }
-    //println!("{:?}", frame_buff[0]);
-    frame_buff
+    eth_buff
 }
 
-fn get_perfect_frames(pattern: Vec<u16>) -> Vec<Vec<u8>>{
-    let src_mac = MacAddr::new(0x05, 0x04, 0x03, 0x02, 0x01, 0x00);
-    let dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, 0x05);
-    let mut frame_buff: Vec<Vec<u8>> = Vec::new();
-    for i in 0..NUM_PACKETS as usize {
-        let length = pattern[i % pattern.len()] as usize;
-        let mut eth_buff = EMPTY_PKT[0..length].to_vec();
-        let mut eth_pkt = ethernet::MutableEthernetPacket::new(&mut eth_buff).unwrap();
-        eth_pkt.set_source(src_mac);
-        eth_pkt.set_destination(dst_mac);
-        eth_pkt.set_ethertype(ethernet::EtherType::new(length as u16));
+// fn get_eth_frames(flow: u8) -> Vec<Vec<u8>> {
+//     let dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, flow);
+//     let src_mac = MacAddr::new(0x05, 0x04, 0x03, 0x02, 0x01, 0x00);
+//     let mut frame_buff: Vec<Vec<u8>> = Vec::new();
+//     for _ in 0..NUM_PACKETS as i32 {
+//         let length = get_random_pkt_len() as usize;
+//         let mut eth_buff = EMPTY_PKT[0..length].to_vec();
+//         let mut eth_pkt = ethernet::MutableEthernetPacket::new(&mut eth_buff).unwrap();
+//         eth_pkt.set_source(src_mac);
+//         eth_pkt.set_destination(dst_mac);
+//         eth_pkt.set_ethertype(ethernet::EtherType::new(length as u16));
 
-        //frame_buff.push(eth_buff.clone());
-        frame_buff.push(eth_buff);
-    }
-    //println!("{:?}", frame_buff[0]);
-    frame_buff
-}
+//         frame_buff.push(eth_buff);
+//     }
+//     //println!("{:?}", frame_buff[0]);
+//     frame_buff
+// }
+
+// fn get_perfect_frames(pattern: Vec<u16>) -> Vec<Vec<u8>>{
+//     let dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, 0x05);
+//     let src_mac = MacAddr::new(0x05, 0x04, 0x03, 0x02, 0x01, 0x00);
+//     let mut frame_buff: Vec<Vec<u8>> = Vec::new();
+//     for i in 0..NUM_PACKETS as usize {
+//         let length = pattern[i % pattern.len()] as usize;
+//         let mut eth_buff = EMPTY_PKT[0..length].to_vec();
+//         let mut eth_pkt = ethernet::MutableEthernetPacket::new(&mut eth_buff).unwrap();
+//         eth_pkt.set_source(src_mac);
+//         eth_pkt.set_destination(dst_mac);
+//         eth_pkt.set_ethertype(ethernet::EtherType::new(length as u16));
+
+//         //frame_buff.push(eth_buff.clone());
+//         frame_buff.push(eth_buff);
+//     }
+//     //println!("{:?}", frame_buff[0]);
+//     frame_buff
+// }
 
 fn get_random_pkt_len() -> i32 {
     let mut rng = rand::thread_rng();
-    rng.gen_range(MIN_ETH_LEN..=MTU as i32)
+    rng.gen_range(MIN_ETH_LEN..=(MTU-IP_HEADER_LEN) as i32)
 }
 
 fn encode_sequence_num(arr: &mut Vec<u8>, seq: i64) {
@@ -259,6 +285,32 @@ fn decode_sequence_num(arr: &[u8]) -> i64 {
                     (arr[ETH_HDR_LEN+5] as i64) << 16 |
                     (arr[ETH_HDR_LEN+6] as i64) << 8 |
                     arr[ETH_HDR_LEN+7] as i64;
-    
     seq
+}
+
+fn is_dst_addr_matching(buff: &[u8], flow: u8) -> bool {
+    let expected_dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, flow);
+    let eth_pkt = ethernet::EthernetPacket::new(buff).unwrap();
+    let dst_addr = eth_pkt.get_destination();
+
+    dst_addr == expected_dst_mac
+}
+
+pub fn get_env_var_f64(name: &str) -> Result<f64, &'static str> {
+    let var = match env::var(name) {
+        Ok(var) => {
+            match var.parse::<f64>() {
+                Ok(var) => {
+                    var
+                },
+                Err(_) => {
+                    return Err("Error parsing env variable string");
+                }
+            }
+        },
+        Err(_) => {
+            return Err("Error getting env vairable");
+        },
+    };
+    Ok(var)
 }
