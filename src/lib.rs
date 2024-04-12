@@ -1,9 +1,12 @@
+use std::net;
 use std::sync::mpsc::{self, Receiver, Sender};
 use pnet::datalink;
+use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::packet::ipv4;
 use std::error::Error;
 use std::thread;
-use pnet::packet::ethernet;
-use pnet::util::MacAddr;
+// use pnet::packet::ethernet;
+// use pnet::util::MacAddr;
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 use std::env;
@@ -12,11 +15,16 @@ const NUM_PACKETS: f64 = 1e1;
 const MIN_ETH_LEN: i32 = 64;
 const MTU: usize = 1500;
 const IP_HEADER_LEN: usize = 20;
+const VPN_HEADER_LEN: usize = 66;
 const EMPTY_PKT: [u8; MTU] = [0; MTU];
 //const PACKETS_PER_SECOND: f64 = 0.8e4;
 const SAFETY_BUFFER: f64 = 0.0;
 const NUM_SEC_BW_UPDATES: f64 = 1.0;
 const ETH_HDR_LEN: usize = 14;
+
+const IP_VERSION: u8 = 4;
+// const SRC_IP_ADDR: [u8;4] = [10, 10, 0, 1];
+const DST_IP_ADDR: [u8;4] = [10, 10, 1, 1];
 
 struct ChannelCustom {
     tx: Box<dyn datalink::DataLinkSender>,
@@ -111,7 +119,8 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8) {
 
     loop {
     //for _ in (0..NUM_PACKETS as usize) {
-        let frame = &mut get_eth_frame(flow);
+        let frame = &mut get_ipv4_packet(flow);
+        // println!("{:?}", frame);
         encode_sequence_num(  frame, count);
         match ch_tx.tx.send_to(frame, None) {
             Some(res) => {
@@ -164,7 +173,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8) {
         match ch_rx.rx.next() {
             // process_packet(packet, &mut scheduler),
             Ok(pkt) =>  {
-                if is_dst_addr_matching(pkt, flow) { 
+                if is_dst_ip_addr_matching(pkt, flow) { 
                     let seq = decode_sequence_num(pkt);
                     //println!("{seq}");
                     total_seq_mismatch += seq - count;
@@ -208,17 +217,39 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8) {
     }
 }
 
-fn get_eth_frame(flow: u8) -> Vec<u8> {
-    let dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, flow);
-    let src_mac = MacAddr::new(0x05, 0x04, 0x03, 0x02, 0x01, 0x00);
-    let length = get_random_pkt_len() as usize;
-    let mut eth_buff = EMPTY_PKT[0..length].to_vec();
-    let mut eth_pkt = ethernet::MutableEthernetPacket::new(&mut eth_buff).unwrap();
-    eth_pkt.set_source(src_mac);
-    eth_pkt.set_destination(dst_mac);
-    eth_pkt.set_ethertype(ethernet::EtherType::new(length as u16));
+// fn get_eth_frame(flow: u8) -> Vec<u8> {
+//     let dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, flow);
+//     let src_mac = MacAddr::new(0x05, 0x04, 0x03, 0x02, 0x01, 0x00);
+//     let length = get_random_pkt_len() as usize;
+//     let mut eth_buff = EMPTY_PKT[0..length].to_vec();
+//     let mut eth_pkt = ethernet::MutableEthernetPacket::new(&mut eth_buff).unwrap();
+//     eth_pkt.set_source(src_mac);
+//     eth_pkt.set_destination(dst_mac);
+//     eth_pkt.set_ethertype(ethernet::EtherType::new(length as u16));
 
-    eth_buff
+//     eth_buff
+// }
+
+fn get_ipv4_packet(flow: u8) -> Vec<u8> {
+    let src_ip_addr = [10, 10, 0, flow];
+
+    let length = get_random_pkt_len() as usize;
+    let mut ip_buff = EMPTY_PKT[0..length].to_vec();
+    let mut packet = ipv4::MutableIpv4Packet::new(&mut ip_buff).unwrap();
+
+    // Set the IP header fields
+    packet.set_version(IP_VERSION);
+    packet.set_header_length((IP_HEADER_LEN/4) as u8);
+    packet.set_total_length(length as u16); // Set the total length of the packet
+    //packet.set_identification(1234);
+    packet.set_ttl(64);
+    packet.set_next_level_protocol(IpNextHeaderProtocols::Udp); 
+    packet.set_source(src_ip_addr.into());
+    packet.set_destination(DST_IP_ADDR.into());
+
+    packet.set_checksum(pnet::packet::ipv4::checksum(&packet.to_immutable()));
+
+    ip_buff
 }
 
 // fn get_eth_frames(flow: u8) -> Vec<Vec<u8>> {
@@ -260,40 +291,49 @@ fn get_eth_frame(flow: u8) -> Vec<u8> {
 
 fn get_random_pkt_len() -> i32 {
     let mut rng = rand::thread_rng();
-    rng.gen_range(MIN_ETH_LEN..=(MTU-IP_HEADER_LEN) as i32)
+    rng.gen_range(MIN_ETH_LEN..=(MTU-IP_HEADER_LEN-VPN_HEADER_LEN) as i32)
 }
 
 fn encode_sequence_num(arr: &mut Vec<u8>, seq: i64) {
     // Encode as 32bit integer -> 4 bytes
-    arr[ETH_HDR_LEN] = ((seq >> 56) & 0xFF) as u8;
-    arr[ETH_HDR_LEN+1] = ((seq >> 48) & 0xFF) as u8;
-    arr[ETH_HDR_LEN+2] = ((seq >> 40) & 0xFF) as u8;
-    arr[ETH_HDR_LEN+3] = ((seq >> 32) & 0xFF) as u8;
-    arr[ETH_HDR_LEN+4] = ((seq >> 24) & 0xFF) as u8;
-    arr[ETH_HDR_LEN+5] = ((seq >> 16) & 0xFF) as u8;
-    arr[ETH_HDR_LEN+6] = ((seq >> 8) & 0xFF) as u8;
-    arr[ETH_HDR_LEN+7] = (seq & 0xFF) as u8;
+    arr[IP_HEADER_LEN] = ((seq >> 56) & 0xFF) as u8;
+    arr[IP_HEADER_LEN+1] = ((seq >> 48) & 0xFF) as u8;
+    arr[IP_HEADER_LEN+2] = ((seq >> 40) & 0xFF) as u8;
+    arr[IP_HEADER_LEN+3] = ((seq >> 32) & 0xFF) as u8;
+    arr[IP_HEADER_LEN+4] = ((seq >> 24) & 0xFF) as u8;
+    arr[IP_HEADER_LEN+5] = ((seq >> 16) & 0xFF) as u8;
+    arr[IP_HEADER_LEN+6] = ((seq >> 8) & 0xFF) as u8;
+    arr[IP_HEADER_LEN+7] = (seq & 0xFF) as u8;
 }
 
 fn decode_sequence_num(arr: &[u8]) -> i64 {
     // Encode as 32bit integer -> 4 bytes24
-    let seq = (arr[ETH_HDR_LEN] as i64) << 56 |
-                    (arr[ETH_HDR_LEN+1] as i64) << 48 |
-                    (arr[ETH_HDR_LEN+2] as i64) << 40 |
-                    (arr[ETH_HDR_LEN+3] as i64) << 32 |
-                    (arr[ETH_HDR_LEN+4] as i64) << 24 |
-                    (arr[ETH_HDR_LEN+5] as i64) << 16 |
-                    (arr[ETH_HDR_LEN+6] as i64) << 8 |
-                    arr[ETH_HDR_LEN+7] as i64;
+    let seq = (arr[IP_HEADER_LEN] as i64) << 56 |
+                    (arr[IP_HEADER_LEN+1] as i64) << 48 |
+                    (arr[IP_HEADER_LEN+2] as i64) << 40 |
+                    (arr[IP_HEADER_LEN+3] as i64) << 32 |
+                    (arr[IP_HEADER_LEN+4] as i64) << 24 |
+                    (arr[IP_HEADER_LEN+5] as i64) << 16 |
+                    (arr[IP_HEADER_LEN+6] as i64) << 8 |
+                    arr[IP_HEADER_LEN+7] as i64;
     seq
 }
 
-fn is_dst_addr_matching(buff: &[u8], flow: u8) -> bool {
-    let expected_dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, flow);
-    let eth_pkt = ethernet::EthernetPacket::new(buff).unwrap();
-    let dst_addr = eth_pkt.get_destination();
+// fn is_dst_addr_matching(buff: &[u8], flow: u8) -> bool {
+//     let expected_dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, flow);
+//     let eth_pkt = ethernet::EthernetPacket::new(buff).unwrap();
+//     let dst_addr = eth_pkt.get_destination();
 
-    dst_addr == expected_dst_mac
+//     dst_addr == expected_dst_mac
+// }
+
+fn is_dst_ip_addr_matching(buff: &[u8], flow: u8) -> bool {
+    let pkt = ipv4::Ipv4Packet::new(buff).unwrap();
+    let dst_addr = pkt.get_destination();
+
+    // println!("{}, {}", dst_addr, net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3]));
+
+    dst_addr == net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3])
 }
 
 pub fn get_env_var_f64(name: &str) -> Result<f64, &'static str> {
