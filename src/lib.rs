@@ -24,7 +24,7 @@ const NUM_PKTS_TO_SAVE: f64 = 1e5;
 
 const IP_HEADER_LEN: usize = 20;
 const VPN_HEADER_LEN: usize = 80;
-const IP_SRC_ADDR_OFFSET: usize = 12;
+const IP_DST_ADDR_OFFSET: usize = 16;
 const IP_ADDR_LEN: usize = 4;
 const IP_VERSION: u8 = 4;
 
@@ -413,7 +413,7 @@ fn is_dst_ip_addr_matching(buff: &[u8], ip_dst: [u8;4]) -> bool {
     // println!("{}, {}", dst_addr, net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3]));
     // dst_addr == net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3])
 
-    buff[IP_SRC_ADDR_OFFSET..IP_SRC_ADDR_OFFSET+IP_ADDR_LEN] == ip_dst
+    buff[IP_DST_ADDR_OFFSET..IP_DST_ADDR_OFFSET+IP_ADDR_LEN] == ip_dst
 }
 
 pub fn get_env_var_f64(name: &str) -> Result<f64, &'static str> {
