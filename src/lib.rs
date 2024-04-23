@@ -13,71 +13,103 @@ use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::time;
+use toml::Value;
 
-// const NUM_PACKETS: f64 = 1e1;
 const MIN_ETH_LEN: i32 = 64;
 const MTU: usize = 1500;
-const IP_HEADER_LEN: usize = 20;
-const VPN_HEADER_LEN: usize = 80;
 const EMPTY_PKT: [u8; MTU] = [0; MTU];
-//const PACKETS_PER_SECOND: f64 = 0.8e4;
 const SAFETY_BUFFER: f64 = 0.0;
 const NUM_SEC_BW_UPDATES: f64 = 1.0;
-// const ETH_HDR_LEN: usize = 14;
 const NUM_PKTS_TO_SAVE: f64 = 1e5;
 
+const IP_HEADER_LEN: usize = 20;
+const VPN_HEADER_LEN: usize = 80;
+const IP_SRC_ADDR_OFFSET: usize = 12;
+const IP_ADDR_LEN: usize = 4;
 const IP_VERSION: u8 = 4;
-// const SRC_IP_ADDR: [u8;4] = [10, 10, 0, 1];
-const DST_IP_ADDR: [u8;4] = [10, 10, 1, 1];
 
 struct ChannelCustom {
     tx: Box<dyn datalink::DataLinkSender>,
     rx: Box<dyn datalink::DataLinkReceiver>,
 }
 
-pub fn run(input: String, output: String, pps: f64, flow: u8) -> Result<(), Box<dyn Error>> {
-    println!("Sending Ethernet frames on interface {}...", input);
-    println!("Receiving Ethernet frames on interface {}...", output);
-    let save_data = true;
-
+pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
+    
+    // Channel to communicate data on it
     let (sender, receiver) = mpsc::channel();
 
-    let is_run_specific_core = false;
-    let core_id_tx = 0;
-    let core_id_rx = 1;
+    let pps = settings["general"]["pps"].as_float().expect("PPS setting not found");
+    let save_data = settings["general"]["save"].as_bool().expect("Save setting not found");
+    let is_sender = settings["general"]["send"].as_bool().expect("Send setting not found");
+    let is_receiver = settings["general"]["receive"].as_bool().expect("Receive setting not found");
 
-    println!("Sending on specific cores = {}", is_run_specific_core);
+    let ip_src = parse_ip(settings["ip"]["src"].as_str().expect("Src ip address not found").to_string());
+    let ip_dst = parse_ip(settings["ip"]["dst"].as_str().expect("Dst ip address not found").to_string());
+    
+    let is_send_isolated = settings["isolation"]["isolate_send"].as_bool().expect("Isolate send setting not found");  
+    let core_id_send = settings["isolation"]["core_send"].as_integer().expect("Core send setting not found") as usize;
+
+    let is_receive_isolated = settings["isolation"]["isolate_receive"].as_bool().expect("Isolate receive setting not found");     
+    let core_id_receive = settings["isolation"]["core_receive"].as_integer().expect("Core receive setting not found") as usize;
+
+    let priority = settings["isolation"]["priority"].as_integer().expect("Thread priority setting not found") as i32; 
+
+    let input = settings["interface"]["input"].as_str().expect("Input interface setting not found").to_string(); 
+    let output = settings["interface"]["output"].as_str().expect("Output interface setting not found").to_string(); 
+
+    println!("Sending Ethernet frames on interface {}...", input);
+    println!("Receiving Ethernet frames on interface {}...", output);
+    println!("Sending on specific cores = {}", is_send_isolated);
 
     // Spawn thread for sending packets
     let send_handle = thread::spawn(move || {
-        if is_run_specific_core {
+        if is_send_isolated {
             unsafe {
                 let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
-                libc::CPU_SET(core_id_tx, &mut cpuset);
+                libc::CPU_SET(core_id_send, &mut cpuset);
                 libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), &cpuset);
+
+                let thread =  libc::pthread_self();
+                let param = libc::sched_param { sched_priority: priority };
+                let result = libc::pthread_setschedparam(thread, libc::SCHED_FIFO, &param as *const libc::sched_param);
+                if result != 0 {
+                    panic!("Failed to set thread priority");
+                }
             }
         }
 
-        send(&input, sender, pps, flow, save_data);
+        send(&input, sender, pps, ip_src, ip_dst, save_data);
     });
 
     // Spawn thread for receiving packets
     let recv_handle = thread::spawn(move || {
-        if is_run_specific_core {
+        if is_receive_isolated {
             unsafe {
                 let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
-                libc::CPU_SET(core_id_rx, &mut cpuset);
+                libc::CPU_SET(core_id_receive, &mut cpuset);
                 libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), &cpuset);
+
+                let thread =  libc::pthread_self();
+                let param = libc::sched_param { sched_priority: priority };
+                let result = libc::pthread_setschedparam(thread, libc::SCHED_FIFO, &param as *const libc::sched_param);
+                if result != 0 {
+                    panic!("Failed to set thread priority");
+                }
             }
         }
 
-        receive(&output, receiver, pps, flow, save_data);
+        receive(&output, receiver, pps, ip_dst, save_data);
     });
 
-    recv_handle.join().expect("Receiving thread panicked");
-    // Wait 1s before tsarting to send
-    thread::sleep(Duration::new(1, 0));
-    send_handle.join().expect("Sending thread panicked");
+    if is_receiver {
+        recv_handle.join().expect("Receiving thread panicked");
+    }
+
+    if is_sender {
+        // Wait 1s before tsarting to send
+        thread::sleep(Duration::new(1, 0));
+        send_handle.join().expect("Sending thread panicked");
+    }
 
     Ok(())
 }
@@ -107,7 +139,7 @@ fn get_channel(interface_name: &str) -> Result<ChannelCustom, &'static str>{
     Ok(ch)
 }
 
-fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8, save_data: bool) {
+fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;4], save_data: bool) {
     let mut ch_tx = match get_channel(input) {
         Ok(tx) => tx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -136,8 +168,8 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8, save_data: bool) {
     // let mut last_msg_time = Instant::now();
 
     while count < NUM_PKTS_TO_SAVE as i64 {
-    //for _ in (0..NUM_PACKETS as usize) {
-        let frame = &mut get_ipv4_packet(flow);
+    //loop {
+        let frame = &mut get_ipv4_packet(ip_src, ip_dst);
         // println!("{:?}", frame);
         encode_sequence_num(  frame, count);
         match ch_tx.tx.send_to(frame, None) {
@@ -182,7 +214,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8, save_data: bool) {
     }
 }
 
-fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8, save_data: bool) {
+fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], save_data: bool) {
     let mut ch_rx = match get_channel(output) {
         Ok(rx) => rx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -212,7 +244,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8, save_data:
         match ch_rx.rx.next() {
             // process_packet(packet, &mut scheduler),
             Ok(pkt) =>  {
-                if is_dst_ip_addr_matching(pkt, flow) { 
+                if is_dst_ip_addr_matching(pkt, ip_dst) { 
                     let seq = decode_sequence_num(pkt);
                     let mismatch = seq.abs_diff(count);
                     // println!("{seq}");
@@ -280,9 +312,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8, save_data:
 //     eth_buff
 // }
 
-fn get_ipv4_packet(flow: u8) -> Vec<u8> {
-    let src_ip_addr = [10, 10, 0, flow];
-
+fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4]) -> Vec<u8> {
     let length = get_random_pkt_len() as usize;
     let mut ip_buff = EMPTY_PKT[0..length].to_vec();
     let mut packet = ipv4::MutableIpv4Packet::new(&mut ip_buff).unwrap();
@@ -294,8 +324,8 @@ fn get_ipv4_packet(flow: u8) -> Vec<u8> {
     //packet.set_identification(1234);
     packet.set_ttl(64);
     packet.set_next_level_protocol(IpNextHeaderProtocols::Udp); 
-    packet.set_source(src_ip_addr.into());
-    packet.set_destination(DST_IP_ADDR.into());
+    packet.set_source(ip_src.into());
+    packet.set_destination(ip_dst.into());
 
     packet.set_checksum(pnet::packet::ipv4::checksum(&packet.to_immutable()));
 
@@ -377,13 +407,13 @@ fn decode_sequence_num(arr: &[u8]) -> usize {
 //     dst_addr == expected_dst_mac
 // }
 
-fn is_dst_ip_addr_matching(buff: &[u8], flow: u8) -> bool {
-    let pkt = ipv4::Ipv4Packet::new(buff).unwrap();
-    let dst_addr = pkt.get_destination();
-
+fn is_dst_ip_addr_matching(buff: &[u8], ip_dst: [u8;4]) -> bool {
+    // let pkt = ipv4::Ipv4Packet::new(buff).unwrap();
+    // let dst_addr = pkt.get_destination();
     // println!("{}, {}", dst_addr, net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3]));
+    // dst_addr == net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3])
 
-    dst_addr == net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3])
+    buff[IP_SRC_ADDR_OFFSET..IP_SRC_ADDR_OFFSET+IP_ADDR_LEN] == ip_dst
 }
 
 pub fn get_env_var_f64(name: &str) -> Result<f64, &'static str> {
@@ -403,4 +433,14 @@ pub fn get_env_var_f64(name: &str) -> Result<f64, &'static str> {
         },
     };
     Ok(var)
+}
+
+fn parse_ip(ip_str: String) -> [u8;4] {
+    let ip_addr = match ip_str.parse::<net::Ipv4Addr>() {
+        Ok(addr) => addr,
+        Err(e) => {
+            panic!("Failed to parse IP address: {}", e);
+        }
+    };
+    ip_addr.octets()
 }
