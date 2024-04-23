@@ -10,17 +10,21 @@ use std::thread;
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::time;
 
-const NUM_PACKETS: f64 = 1e1;
+// const NUM_PACKETS: f64 = 1e1;
 const MIN_ETH_LEN: i32 = 64;
 const MTU: usize = 1500;
 const IP_HEADER_LEN: usize = 20;
-const VPN_HEADER_LEN: usize = 66;
+const VPN_HEADER_LEN: usize = 80;
 const EMPTY_PKT: [u8; MTU] = [0; MTU];
 //const PACKETS_PER_SECOND: f64 = 0.8e4;
 const SAFETY_BUFFER: f64 = 0.0;
 const NUM_SEC_BW_UPDATES: f64 = 1.0;
-const ETH_HDR_LEN: usize = 14;
+// const ETH_HDR_LEN: usize = 14;
+const NUM_PKTS_TO_SAVE: f64 = 1e5;
 
 const IP_VERSION: u8 = 4;
 // const SRC_IP_ADDR: [u8;4] = [10, 10, 0, 1];
@@ -34,6 +38,7 @@ struct ChannelCustom {
 pub fn run(input: String, output: String, pps: f64, flow: u8) -> Result<(), Box<dyn Error>> {
     println!("Sending Ethernet frames on interface {}...", input);
     println!("Receiving Ethernet frames on interface {}...", output);
+    let save_data = true;
 
     let (sender, receiver) = mpsc::channel();
 
@@ -53,7 +58,7 @@ pub fn run(input: String, output: String, pps: f64, flow: u8) -> Result<(), Box<
             }
         }
 
-        send(&input, sender, pps, flow);
+        send(&input, sender, pps, flow, save_data);
     });
 
     // Spawn thread for receiving packets
@@ -66,11 +71,13 @@ pub fn run(input: String, output: String, pps: f64, flow: u8) -> Result<(), Box<
             }
         }
 
-        receive(&output, receiver, pps, flow);
+        receive(&output, receiver, pps, flow, save_data);
     });
 
-    send_handle.join().expect("Sending thread panicked");
     recv_handle.join().expect("Receiving thread panicked");
+    // Wait 1s before tsarting to send
+    thread::sleep(Duration::new(1, 0));
+    send_handle.join().expect("Sending thread panicked");
 
     Ok(())
 }
@@ -100,16 +107,27 @@ fn get_channel(interface_name: &str) -> Result<ChannelCustom, &'static str>{
     Ok(ch)
 }
 
-fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8) {
+fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8, save_data: bool) {
     let mut ch_tx = match get_channel(input) {
         Ok(tx) => tx,
         Err(error) => panic!("Error getting channel: {error}"),
     };
 
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(save_data) // Overwrite
+        .create(true)
+        .open("tx_data.csv")
+        .expect("Could not open file");
+
+    if save_data {
+        writeln!(file, "Seq,Time").expect("Failed to write to file");
+    }
+
     //let mut packets = get_eth_frames();
     //let packets = get_perfect_frames(vec![64,751]);
-    let mut i = 0;
     let mut count = 0;
+    let delays = vec![0; 1e6 as usize];
 
     //let interval = Duration::from_micros((1e6/pps) as u64);
     let interval = Duration::from_nanos((1e9/pps + SAFETY_BUFFER) as u64);
@@ -117,7 +135,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8) {
     let mut last_iteration_time = Instant::now();
     // let mut last_msg_time = Instant::now();
 
-    loop {
+    while count < NUM_PKTS_TO_SAVE as i64 {
     //for _ in (0..NUM_PACKETS as usize) {
         let frame = &mut get_ipv4_packet(flow);
         // println!("{:?}", frame);
@@ -133,15 +151,22 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8) {
                 eprintln!("No packets to send");
             }
         }
-        i = (i+1) % NUM_PACKETS as usize;
-        if count % (pps * NUM_SEC_BW_UPDATES) as i64 == 0 {
+
+        if save_data && count < delays.len() as i64 {
+            // Move this to the end if too unefficient
+            let current_time = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap();
+            writeln!(file, "{},{}", count, current_time.as_nanos()).expect("Failed to write to file");
+            //delays[count as usize] = elapsed_time.as_nanos()
+        }
+
+        if count % (pps * NUM_SEC_BW_UPDATES) as i64 == 0 && count < NUM_PKTS_TO_SAVE as i64 {
             // let seq = decode_sequence_num(frame);
             // println!("Sending {} of length {}", seq, frame.len());
-
             sender.send(count).unwrap();
             //println!("Sent {} packets in {:?}", count, last_msg_time.elapsed()); 
             // last_msg_time = Instant::now();
         }
+
         count += 1;
 
         // Calculate time to sleep
@@ -157,30 +182,51 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, flow: u8) {
     }
 }
 
-fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8) {
+fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8, save_data: bool) {
     let mut ch_rx = match get_channel(output) {
         Ok(rx) => rx,
         Err(error) => panic!("Error getting channel: {error}"),
     };
 
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(save_data) // Overwrite
+        .create(true)
+        .open("rx_data.csv")
+        .expect("Could not open file");
+
+    if save_data {
+        writeln!(file, "Seq,Time").expect("Failed to write to file");
+    }
+
     let mut total_seq_mismatch = 0;
     let mut max_seq_mismatch = 0;
-    let mut min_seq_mismatch = 0;
 
     let mut last_msg_time = Instant::now();
-    let mut count = 0;
-    loop {
+    let mut count: usize = 0;
+    let mut delays = vec![0; NUM_PKTS_TO_SAVE as usize];
+    let mut seqs = vec![0; NUM_PKTS_TO_SAVE as usize];
+
+    while count < NUM_PKTS_TO_SAVE as usize {
+    // loop {
         match ch_rx.rx.next() {
             // process_packet(packet, &mut scheduler),
             Ok(pkt) =>  {
                 if is_dst_ip_addr_matching(pkt, flow) { 
                     let seq = decode_sequence_num(pkt);
-                    //println!("{seq}");
-                    total_seq_mismatch += seq - count;
-                    if seq - count > max_seq_mismatch {
-                        max_seq_mismatch = seq - count;
-                    } else if seq - count < min_seq_mismatch {
-                        min_seq_mismatch = seq - count;
+                    let mismatch = seq.abs_diff(count);
+                    // println!("{seq}");
+                    total_seq_mismatch += mismatch;
+                    if mismatch > max_seq_mismatch {
+                        max_seq_mismatch = mismatch;
+                    } 
+
+                    if save_data {
+                        // Move this to the end if too unefficient
+                        delays[count] = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_nanos();
+                        seqs[count] = seq;
+                        writeln!(file, "{},{}", seqs[count], delays[count]).expect("Failed to write to file");
+                        //delays[count as usize] = elapsed_time.as_nanos()
                     }
                     count += 1;
                 }
@@ -192,10 +238,10 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8) {
             }
         };
 
-        if count % pps as i64 == 0 {
-            //println!("Received {} in {:?}", count, last_msg_time.elapsed());
-            last_msg_time = Instant::now();
-        }
+        // if count % pps as usize == 0 {
+        //     println!("Received {} in {:?}", count, last_msg_time.elapsed());
+        //     last_msg_time = Instant::now();
+        // }
 
         match receiver.try_recv() {
             Ok(num_pkts) => {
@@ -209,12 +255,16 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, flow: u8) {
 
                 last_msg_time = Instant::now();
                 println!("Latency in received packets of {:.2}% or {:.0}ns, total {:.4}ms", 100.0 * latency_ratio, latency_time, latency_total);
-                println!("Average reordering of {}, max of {} and min of {}, received {} packets", avg_reorder, max_seq_mismatch, min_seq_mismatch, count);
+                println!("Average reordering of {}, max of {}, received {} packets", avg_reorder, max_seq_mismatch, count);
             },
             _ => continue,
         }
         
     }
+
+    // for i in 0..NUM_PKTS_TO_SAVE as usize {
+    //     writeln!(file, "{},{}", seqs[i], delays[i]).expect("Failed to write to file");
+    // }
 }
 
 // fn get_eth_frame(flow: u8) -> Vec<u8> {
@@ -306,7 +356,7 @@ fn encode_sequence_num(arr: &mut Vec<u8>, seq: i64) {
     arr[IP_HEADER_LEN+7] = (seq & 0xFF) as u8;
 }
 
-fn decode_sequence_num(arr: &[u8]) -> i64 {
+fn decode_sequence_num(arr: &[u8]) -> usize {
     // Encode as 32bit integer -> 4 bytes24
     let seq = (arr[IP_HEADER_LEN] as i64) << 56 |
                     (arr[IP_HEADER_LEN+1] as i64) << 48 |
@@ -316,7 +366,7 @@ fn decode_sequence_num(arr: &[u8]) -> i64 {
                     (arr[IP_HEADER_LEN+5] as i64) << 16 |
                     (arr[IP_HEADER_LEN+6] as i64) << 8 |
                     arr[IP_HEADER_LEN+7] as i64;
-    seq
+    seq as usize
 }
 
 // fn is_dst_addr_matching(buff: &[u8], flow: u8) -> bool {
