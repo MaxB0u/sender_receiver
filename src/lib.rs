@@ -60,29 +60,10 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     println!("Sending Ethernet frames on interface {}...", input);
     println!("Receiving Ethernet frames on interface {}...", output);
     println!("Sending on specific cores = {}", is_send_isolated);
-
-    // Spawn thread for sending packets
-    let send_handle = thread::spawn(move || {
-        if is_send_isolated {
-            unsafe {
-                let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
-                libc::CPU_SET(core_id_send, &mut cpuset);
-                libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), &cpuset);
-
-                let thread =  libc::pthread_self();
-                let param = libc::sched_param { sched_priority: priority };
-                let result = libc::pthread_setschedparam(thread, libc::SCHED_FIFO, &param as *const libc::sched_param);
-                if result != 0 {
-                    panic!("Failed to set thread priority");
-                }
-            }
-        }
-
-        send(&input, sender, pps, ip_src, ip_dst, save_data);
-    });
-
-    // Spawn thread for receiving packets
-    let recv_handle = thread::spawn(move || {
+    
+    if is_receiver {
+        // Spawn thread for receiving packets
+        let recv_handle = thread::spawn(move || {
         if is_receive_isolated {
             unsafe {
                 let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
@@ -97,15 +78,32 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+            receive(&output, receiver, pps, ip_dst, save_data);
+        });
 
-        receive(&output, receiver, pps, ip_dst, save_data);
-    });
-
-    if is_receiver {
         recv_handle.join().expect("Receiving thread panicked");
     }
 
     if is_sender {
+        // Spawn thread for sending packets
+        let send_handle = thread::spawn(move || {
+            if is_send_isolated {
+                unsafe {
+                    let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
+                    libc::CPU_SET(core_id_send, &mut cpuset);
+                    libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), &cpuset);
+
+                    let thread =  libc::pthread_self();
+                    let param = libc::sched_param { sched_priority: priority };
+                    let result = libc::pthread_setschedparam(thread, libc::SCHED_FIFO, &param as *const libc::sched_param);
+                    if result != 0 {
+                        panic!("Failed to set thread priority");
+                    }
+                }
+            }
+
+            send(&input, sender, pps, ip_src, ip_dst, save_data);
+        });
         // Wait 1s before tsarting to send
         thread::sleep(Duration::new(1, 0));
         send_handle.join().expect("Sending thread panicked");
@@ -140,6 +138,8 @@ fn get_channel(interface_name: &str) -> Result<ChannelCustom, &'static str>{
 }
 
 fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;4], save_data: bool) {
+    println!("Sending...");
+    
     let mut ch_tx = match get_channel(input) {
         Ok(tx) => tx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -215,6 +215,8 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
 }
 
 fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], save_data: bool) {
+    println!("Receiving...");
+
     let mut ch_rx = match get_channel(output) {
         Ok(rx) => rx,
         Err(error) => panic!("Error getting channel: {error}"),
