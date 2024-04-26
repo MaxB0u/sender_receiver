@@ -7,7 +7,7 @@ fn main() {
 
     // Check if at least four arguments are provided
     if args.len() < 2 {
-        eprintln!("Usage (give 4 interface names): {} <config file>", args[0]);
+        eprintln!("Usage: {} <config file>", args[0]);
         std::process::exit(1);
     }
 

@@ -18,8 +18,10 @@ output="eth1"
 
 #Other parameters
 [general]
-pps=2e4
+pps=30000.0
+num_pkts=200000
 save=true
-send=false
-receive=true
+send=true
+receive=false
+log=false
 

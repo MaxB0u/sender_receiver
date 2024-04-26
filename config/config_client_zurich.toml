@@ -1,7 +1,7 @@
 # IP addresses used by VPN
 [ip]
-src="10.10.0.1"
-dst="10.10.1.1"
+src="10.7.0.2"
+dst="10.7.0.1"
 
 # If CPU isolation is used
 # Core number don't matter if no isolation
@@ -18,8 +18,10 @@ output="ens39"
 
 #Other parameters
 [general]
-pps=2e4
+pps=30000.0
+num_pkts=200000
 save=true
 send=true
 receive=false
+log=false
 

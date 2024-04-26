@@ -20,7 +20,7 @@ const MTU: usize = 1500;
 const EMPTY_PKT: [u8; MTU] = [0; MTU];
 const SAFETY_BUFFER: f64 = 0.0;
 const NUM_SEC_BW_UPDATES: f64 = 1.0;
-const NUM_PKTS_TO_SAVE: f64 = 1e5;
+// const NUM_PKTS_TO_SAVE: f64 = 1e5;
 
 const IP_HEADER_LEN: usize = 20;
 const VPN_HEADER_LEN: usize = 80;
@@ -34,7 +34,6 @@ struct ChannelCustom {
 }
 
 pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
-    
     // Channel to communicate data on it
     let (sender, receiver) = mpsc::channel();
 
@@ -42,6 +41,8 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     let save_data = settings["general"]["save"].as_bool().expect("Save setting not found");
     let is_sender = settings["general"]["send"].as_bool().expect("Send setting not found");
     let is_receiver = settings["general"]["receive"].as_bool().expect("Receive setting not found");
+    let num_pkts = settings["general"]["num_pkts"].as_integer().expect("Num pkts setting not found");
+    let is_log = settings["general"]["log"].as_bool().expect("Is log setting not found");
 
     let ip_src = parse_ip(settings["ip"]["src"].as_str().expect("Src ip address not found").to_string());
     let ip_dst = parse_ip(settings["ip"]["dst"].as_str().expect("Dst ip address not found").to_string());
@@ -57,9 +58,11 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     let input = settings["interface"]["input"].as_str().expect("Input interface setting not found").to_string(); 
     let output = settings["interface"]["output"].as_str().expect("Output interface setting not found").to_string(); 
 
-    println!("Sending Ethernet frames on interface {}...", input);
-    println!("Receiving Ethernet frames on interface {}...", output);
-    println!("Sending on specific cores = {}", is_send_isolated);
+    if is_log {
+        println!("Sending Ethernet frames on interface {}...", input);
+        println!("Receiving Ethernet frames on interface {}...", output);
+        println!("Sending on specific cores = {}", is_send_isolated);    
+    }
     
     if is_receiver {
         // Spawn thread for receiving packets
@@ -78,7 +81,7 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-            receive(&output, receiver, pps, ip_dst, save_data);
+            receive(&output, receiver, pps, ip_dst, num_pkts, save_data);
         });
 
         recv_handle.join().expect("Receiving thread panicked");
@@ -102,7 +105,7 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            send(&input, sender, pps, ip_src, ip_dst, save_data);
+            send(&input, sender, pps, ip_src, ip_dst, num_pkts, save_data);
         });
         // Wait 1s before tsarting to send
         thread::sleep(Duration::new(1, 0));
@@ -137,9 +140,9 @@ fn get_channel(interface_name: &str) -> Result<ChannelCustom, &'static str>{
     Ok(ch)
 }
 
-fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;4], save_data: bool) {
+fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;4], num_pkts: i64, save_data: bool) {
     println!("Sending...");
-    
+
     let mut ch_tx = match get_channel(input) {
         Ok(tx) => tx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -167,7 +170,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
     let mut last_iteration_time = Instant::now();
     // let mut last_msg_time = Instant::now();
 
-    while count < NUM_PKTS_TO_SAVE as i64 {
+    while count < num_pkts as i64 {
     //loop {
         let frame = &mut get_ipv4_packet(ip_src, ip_dst);
         // println!("{:?}", frame);
@@ -191,7 +194,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
             //delays[count as usize] = elapsed_time.as_nanos()
         }
 
-        if count % (pps * NUM_SEC_BW_UPDATES) as i64 == 0 && count < NUM_PKTS_TO_SAVE as i64 {
+        if count % (pps * NUM_SEC_BW_UPDATES) as i64 == 0 && count < num_pkts as i64 {
             // let seq = decode_sequence_num(frame);
             // println!("Sending {} of length {}", seq, frame.len());
             sender.send(count).unwrap();
@@ -214,7 +217,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
     }
 }
 
-fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], save_data: bool) {
+fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], num_pkts: i64, save_data: bool) {
     println!("Receiving...");
 
     let mut ch_rx = match get_channel(output) {
@@ -238,10 +241,10 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], save
 
     let mut last_msg_time = Instant::now();
     let mut count: usize = 0;
-    let mut delays = vec![0; NUM_PKTS_TO_SAVE as usize];
-    let mut seqs = vec![0; NUM_PKTS_TO_SAVE as usize];
+    let mut delays = vec![0; num_pkts as usize];
+    let mut seqs = vec![0; num_pkts as usize];
 
-    while count < NUM_PKTS_TO_SAVE as usize {
+    while count < num_pkts as usize {
     // loop {
         match ch_rx.rx.next() {
             // process_packet(packet, &mut scheduler),
