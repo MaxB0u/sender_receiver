@@ -24,9 +24,11 @@ const NUM_SEC_BW_UPDATES: f64 = 1.0;
 
 const IP_HEADER_LEN: usize = 20;
 const VPN_HEADER_LEN: usize = 80;
+const IP_SRC_ADDR_OFFSET: usize = 12;
 const IP_DST_ADDR_OFFSET: usize = 16;
 const IP_ADDR_LEN: usize = 4;
 const IP_VERSION: u8 = 4;
+const IP_ADDR_LISTEN_TO: [u8;4] = [10,7,0,4];
 
 struct ChannelCustom {
     tx: Box<dyn datalink::DataLinkSender>,
@@ -81,7 +83,7 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-            receive(&output, receiver, pps, ip_dst, num_pkts, save_data);
+            receive(&output, receiver, pps, num_pkts, save_data);
         });
 
         recv_handle.join().expect("Receiving thread panicked");
@@ -217,7 +219,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
     }
 }
 
-fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], num_pkts: i64, save_data: bool) {
+fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_data: bool) {
     println!("Receiving...");
 
     let mut ch_rx = match get_channel(output) {
@@ -236,7 +238,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], num_
         writeln!(file, "Seq,Time").expect("Failed to write to file");
     }
 
-    let mut total_seq_mismatch = 0;
+    // let mut total_seq_mismatch = 0;
     let mut max_seq_mismatch = 0;
 
     let mut last_msg_time = Instant::now();
@@ -249,11 +251,11 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], num_
         match ch_rx.rx.next() {
             // process_packet(packet, &mut scheduler),
             Ok(pkt) =>  {
-                if is_dst_ip_addr_matching(pkt, ip_dst) { 
+                if is_ip_addr_matching(pkt, false) { 
                     let seq = decode_sequence_num(pkt);
                     let mismatch = seq.abs_diff(count);
                     // println!("{seq}");
-                    total_seq_mismatch += mismatch;
+                    // total_seq_mismatch += mismatch;
                     if mismatch > max_seq_mismatch {
                         max_seq_mismatch = mismatch;
                     } 
@@ -266,6 +268,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], num_
                         //delays[count as usize] = elapsed_time.as_nanos()
                     }
                     count += 1;
+                    println!("{count}")
                 }
                
             },
@@ -287,7 +290,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, ip_dst: [u8;4], num_
                 let latency_total = 1e3 * (num_pkts as f64 - count as f64) / (pps * NUM_SEC_BW_UPDATES);
                 let mut avg_reorder = 0;
                 if count > 0 {
-                    avg_reorder = total_seq_mismatch/count;
+                    // avg_reorder = total_seq_mismatch/count;
                 }
 
                 last_msg_time = Instant::now();
@@ -412,13 +415,16 @@ fn decode_sequence_num(arr: &[u8]) -> usize {
 //     dst_addr == expected_dst_mac
 // }
 
-fn is_dst_ip_addr_matching(buff: &[u8], ip_dst: [u8;4]) -> bool {
+fn is_ip_addr_matching(buff: &[u8], is_dest: bool) -> bool {
     // let pkt = ipv4::Ipv4Packet::new(buff).unwrap();
     // let dst_addr = pkt.get_destination();
     // println!("{}, {}", dst_addr, net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3]));
     // dst_addr == net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3])
-
-    buff[IP_DST_ADDR_OFFSET..IP_DST_ADDR_OFFSET+IP_ADDR_LEN] == ip_dst
+    if is_dest {
+        buff[IP_DST_ADDR_OFFSET..IP_DST_ADDR_OFFSET+IP_ADDR_LEN] == IP_ADDR_LISTEN_TO
+    } else {
+        buff[IP_SRC_ADDR_OFFSET..IP_SRC_ADDR_OFFSET+IP_ADDR_LEN] == IP_ADDR_LISTEN_TO
+    }
 }
 
 pub fn get_env_var_f64(name: &str) -> Result<f64, &'static str> {
