@@ -1,6 +1,6 @@
 # IP addresses used by VPN
 [ip]
-src="10.7.0.2"
+src="10.7.0.4"
 dst="10.7.0.1"
 
 # If CPU isolation is used
@@ -13,13 +13,13 @@ isolate_receive=false
 core_receive=1
 
 [interface]
-input="ens38"
-output="ens39"
+input='ens38'
+output='ens39'
 
 #Other parameters
 [general]
-pps=30000.0
-num_pkts=200000
+pps=17000.0
+num_pkts=170000
 save=true
 send=true
 receive=false

@@ -268,7 +268,6 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_
                         //delays[count as usize] = elapsed_time.as_nanos()
                     }
                     count += 1;
-                    println!("{count}")
                 }
                
             },
@@ -288,7 +287,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_
                 let latency_ratio = (num_pkts as f64 - count as f64) / num_pkts as f64;
                 let latency_time = last_msg_time.elapsed().as_nanos() as f64 * (latency_ratio / (pps * NUM_SEC_BW_UPDATES));
                 let latency_total = 1e3 * (num_pkts as f64 - count as f64) / (pps * NUM_SEC_BW_UPDATES);
-                let mut avg_reorder = 0;
+                let avg_reorder = 0;
                 if count > 0 {
                     // avg_reorder = total_seq_mismatch/count;
                 }
