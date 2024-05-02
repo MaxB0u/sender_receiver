@@ -269,7 +269,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_
                         let rx_time = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_nanos();
                         let rx_seq = seq;
                         let rx_flow = pkt[pkt.len()-1];
-                        writeln!(file, "{},{},{}", rx_time, rx_seq, rx_flow).expect("Failed to write to file");
+                        writeln!(file, "{},{},{}", rx_seq, rx_time, rx_flow).expect("Failed to write to file");
                         //delays[count as usize] = elapsed_time.as_nanos()
                     }
                     count += 1;
