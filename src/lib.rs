@@ -39,6 +39,12 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     // Channel to communicate data on it
     let (sender, receiver) = mpsc::channel();
 
+    // Flow is 0 if none specified
+    let flow = match get_env_var_f64("FLOW") {
+        Ok(f) => f as u8,
+        Err(_) => 0_u8,
+    };
+
     let pps = settings["general"]["pps"].as_float().expect("PPS setting not found");
     let save_data = settings["general"]["save"].as_bool().expect("Save setting not found");
     let is_sender = settings["general"]["send"].as_bool().expect("Send setting not found");
@@ -107,7 +113,7 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            send(&input, sender, pps, ip_src, ip_dst, num_pkts, save_data);
+            send(&input, sender, pps, ip_src, ip_dst, num_pkts, save_data, flow);
         });
         // Wait 1s before tsarting to send
         thread::sleep(Duration::new(1, 0));
@@ -142,7 +148,7 @@ fn get_channel(interface_name: &str) -> Result<ChannelCustom, &'static str>{
     Ok(ch)
 }
 
-fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;4], num_pkts: i64, save_data: bool) {
+fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;4], num_pkts: i64, save_data: bool, flow: u8) {
     println!("Sending...");
 
     let mut ch_tx = match get_channel(input) {
@@ -154,11 +160,11 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
         .write(true)
         .truncate(save_data) // Overwrite
         .create(true)
-        .open("tx_data.csv")
+        .open(format!("tx_data_{}.csv", flow))
         .expect("Could not open file");
 
     if save_data {
-        writeln!(file, "Seq,Time").expect("Failed to write to file");
+        writeln!(file, "Seq,Time,Flow").expect("Failed to write to file");
     }
 
     //let mut packets = get_eth_frames();
@@ -174,7 +180,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
 
     while count < num_pkts as i64 {
     //loop {
-        let frame = &mut get_ipv4_packet(ip_src, ip_dst);
+        let frame = &mut get_ipv4_packet(ip_src, ip_dst, flow);
         // println!("{:?}", frame);
         encode_sequence_num(  frame, count);
         match ch_tx.tx.send_to(frame, None) {
@@ -192,7 +198,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
         if save_data && count < delays.len() as i64 {
             // Move this to the end if too unefficient
             let current_time = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap();
-            writeln!(file, "{},{}", count, current_time.as_nanos()).expect("Failed to write to file");
+            writeln!(file, "{},{},{}", count, current_time.as_nanos(), flow).expect("Failed to write to file");
             //delays[count as usize] = elapsed_time.as_nanos()
         }
 
@@ -235,7 +241,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_
         .expect("Could not open file");
 
     if save_data {
-        writeln!(file, "Seq,Time").expect("Failed to write to file");
+        writeln!(file, "Seq,Time,Flow").expect("Failed to write to file");
     }
 
     // let mut total_seq_mismatch = 0;
@@ -243,8 +249,6 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_
 
     let mut last_msg_time = Instant::now();
     let mut count: usize = 0;
-    let mut delays = vec![0; num_pkts as usize];
-    let mut seqs = vec![0; num_pkts as usize];
 
     while count < num_pkts as usize {
     // loop {
@@ -262,9 +266,10 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_
 
                     if save_data {
                         // Move this to the end if too unefficient
-                        delays[count] = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_nanos();
-                        seqs[count] = seq;
-                        writeln!(file, "{},{}", seqs[count], delays[count]).expect("Failed to write to file");
+                        let rx_time = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_nanos();
+                        let rx_seq = seq;
+                        let rx_flow = pkt[pkt.len()-1];
+                        writeln!(file, "{},{},{}", rx_time, rx_seq, rx_flow).expect("Failed to write to file");
                         //delays[count as usize] = elapsed_time.as_nanos()
                     }
                     count += 1;
@@ -319,7 +324,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_
 //     eth_buff
 // }
 
-fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4]) -> Vec<u8> {
+fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4], flow: u8) -> Vec<u8> {
     let length = get_random_pkt_len() as usize;
     let mut ip_buff = EMPTY_PKT[0..length].to_vec();
     let mut packet = ipv4::MutableIpv4Packet::new(&mut ip_buff).unwrap();
@@ -335,6 +340,9 @@ fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4]) -> Vec<u8> {
     packet.set_destination(ip_dst.into());
 
     packet.set_checksum(pnet::packet::ipv4::checksum(&packet.to_immutable()));
+
+    // Encode flow in last byte
+    ip_buff[length-1] = flow;
 
     ip_buff
 }
