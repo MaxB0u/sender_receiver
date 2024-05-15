@@ -11,9 +11,11 @@ use rand::prelude::*;
 use std::time::{Duration, Instant};
 use std::env;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Write, BufReader};
 use std::time;
 use toml::Value;
+use std::fs::File;
+
 
 const MIN_ETH_LEN: i32 = 64;
 const MTU: usize = 1500;
@@ -23,6 +25,7 @@ const NUM_SEC_BW_UPDATES: f64 = 1.0;
 // const NUM_PKTS_TO_SAVE: f64 = 1e5;
 
 const IP_HEADER_LEN: usize = 20;
+const MIN_PAYLOAD_LEN: usize = 9; // Seq number + flow
 const VPN_HEADER_LEN: usize = 80;
 const IP_SRC_ADDR_OFFSET: usize = 12;
 const IP_DST_ADDR_OFFSET: usize = 16;
@@ -49,8 +52,9 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     let save_data = settings["general"]["save"].as_bool().expect("Save setting not found");
     let is_sender = settings["general"]["send"].as_bool().expect("Send setting not found");
     let is_receiver = settings["general"]["receive"].as_bool().expect("Receive setting not found");
-    let num_pkts = settings["general"]["num_pkts"].as_integer().expect("Num pkts setting not found");
+    let num_pkts = settings["general"]["num_pkts"].as_integer().expect("Num pkts setting not found") as usize;
     let is_log = settings["general"]["log"].as_bool().expect("Is log setting not found");
+    let dataset = settings["general"]["dataset"].as_str().expect("Dataset setting not found").to_string();
 
     let ip_src = parse_ip(settings["ip"]["src"].as_str().expect("Src ip address not found").to_string());
     let ip_dst = parse_ip(settings["ip"]["dst"].as_str().expect("Dst ip address not found").to_string());
@@ -113,7 +117,7 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            send(&input, sender, pps, ip_src, ip_dst, num_pkts, save_data, flow);
+            send(&input, sender, pps, ip_src, ip_dst, num_pkts, save_data, flow, dataset);
         });
         // Wait 1s before tsarting to send
         thread::sleep(Duration::new(1, 0));
@@ -148,9 +152,7 @@ fn get_channel(interface_name: &str) -> Result<ChannelCustom, &'static str>{
     Ok(ch)
 }
 
-fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;4], num_pkts: i64, save_data: bool, flow: u8) {
-    println!("Sending...");
-
+fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;4], num_pkts: usize, save_data: bool, flow: u8, dataset: String) {
     let mut ch_tx = match get_channel(input) {
         Ok(tx) => tx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -169,7 +171,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
 
     //let mut packets = get_eth_frames();
     //let packets = get_perfect_frames(vec![64,751]);
-    let mut count = 0;
+    let mut count: usize = 0;
     let delays = vec![0; 1e6 as usize];
 
     //let interval = Duration::from_micros((1e6/pps) as u64);
@@ -178,11 +180,20 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
     let mut last_iteration_time = Instant::now();
     // let mut last_msg_time = Instant::now();
 
-    while count < num_pkts as i64 {
+    let lengths;
+    if dataset == "caida" {
+        lengths = get_caida_lengths(num_pkts);
+    } else {
+        lengths = get_random_pkt_lengths(num_pkts);
+    }
+
+    println!("Sending...");
+    while count < num_pkts {
     //loop {
-        let frame = &mut get_ipv4_packet(ip_src, ip_dst, flow);
+        let frame = &mut get_ipv4_packet(ip_src, ip_dst, flow, lengths[count] as usize);
         // println!("{:?}", frame);
         encode_sequence_num(  frame, count);
+        // println!("{}", frame.len());
         match ch_tx.tx.send_to(frame, None) {
             Some(res) => {
                 match res {
@@ -195,17 +206,17 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
             }
         }
 
-        if save_data && count < delays.len() as i64 {
+        if save_data && count < delays.len() {
             // Move this to the end if too unefficient
             let current_time = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap();
             writeln!(file, "{},{},{}", count, current_time.as_nanos(), flow).expect("Failed to write to file");
             //delays[count as usize] = elapsed_time.as_nanos()
         }
 
-        if count % (pps * NUM_SEC_BW_UPDATES) as i64 == 0 && count < num_pkts as i64 {
+        if count % (pps * NUM_SEC_BW_UPDATES) as usize == 0 && count < num_pkts {
             // let seq = decode_sequence_num(frame);
             // println!("Sending {} of length {}", seq, frame.len());
-            sender.send(count).unwrap();
+            sender.send(count as i64).unwrap();
             //println!("Sent {} packets in {:?}", count, last_msg_time.elapsed()); 
             // last_msg_time = Instant::now();
         }
@@ -225,9 +236,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
     }
 }
 
-fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_data: bool) {
-    println!("Receiving...");
-
+fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize, save_data: bool) {
     let mut ch_rx = match get_channel(output) {
         Ok(rx) => rx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -250,6 +259,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_
     let mut last_msg_time = Instant::now();
     let mut count: usize = 0;
 
+    println!("Receiving...");
     while count < num_pkts as usize {
     // loop {
         match ch_rx.rx.next() {
@@ -324,15 +334,14 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: i64, save_
 //     eth_buff
 // }
 
-fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4], flow: u8) -> Vec<u8> {
-    let length = get_random_pkt_len() as usize;
-    let mut ip_buff = EMPTY_PKT[0..length].to_vec();
+fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4], flow: u8, pkt_len: usize) -> Vec<u8> {
+    let mut ip_buff = EMPTY_PKT[0..pkt_len].to_vec();
     let mut packet = ipv4::MutableIpv4Packet::new(&mut ip_buff).unwrap();
 
     // Set the IP header fields
     packet.set_version(IP_VERSION);
     packet.set_header_length((IP_HEADER_LEN/4) as u8);
-    packet.set_total_length(length as u16); // Set the total length of the packet
+    packet.set_total_length(pkt_len as u16); // Set the total length of the packet
     //packet.set_identification(1234);
     packet.set_ttl(64);
     packet.set_next_level_protocol(IpNextHeaderProtocols::Udp); 
@@ -342,7 +351,7 @@ fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4], flow: u8) -> Vec<u8> {
     packet.set_checksum(pnet::packet::ipv4::checksum(&packet.to_immutable()));
 
     // Encode flow in last byte
-    ip_buff[length-1] = flow;
+    ip_buff[pkt_len-1] = flow;
 
     ip_buff
 }
@@ -384,12 +393,61 @@ fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4], flow: u8) -> Vec<u8> {
 //     frame_buff
 // }
 
-fn get_random_pkt_len() -> i32 {
+fn get_random_pkt_lengths(num_pkts: usize) -> Vec<i32> {
     let mut rng = rand::thread_rng();
-    rng.gen_range(MIN_ETH_LEN..=(MTU-IP_HEADER_LEN-VPN_HEADER_LEN) as i32)
+    let mut pkt_lengths = Vec::with_capacity(num_pkts);
+
+    for _ in 0..num_pkts {
+        pkt_lengths.push(rng.gen_range(MIN_ETH_LEN..=(MTU-IP_HEADER_LEN-VPN_HEADER_LEN) as i32));
+    }
+    
+    pkt_lengths
 }
 
-fn encode_sequence_num(arr: &mut Vec<u8>, seq: i64) {
+fn get_caida_lengths(num_pkts: usize) -> Vec<i32> {
+    let filename = "../analysis/caida_lengths_small.csv";
+
+    let file = File::open(filename).expect("Error opening caida length file");
+    let reader = BufReader::new(file);
+
+    let mut pkt_lengths = Vec::with_capacity(num_pkts);
+
+    let mut csv_reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(reader);
+
+    let mut count = 0;
+    for result in csv_reader.records() {
+        let record = result.expect("Could not read line in file");
+        if count >= num_pkts {
+            break; 
+        }
+
+        if let Some(field) = record.get(0) {
+            if let Ok(length) = field.parse::<i32>() {
+                if length > (MTU-IP_HEADER_LEN-VPN_HEADER_LEN) as i32 {
+                    // Simulate fragmentation (if MTU is less than half would need to handle more than 2 fragments)
+                    pkt_lengths.push((MTU-IP_HEADER_LEN-VPN_HEADER_LEN) as i32);
+                    // Length - previous fragment + additional ip header
+                    // let second_fragment_len = length - (MTU-IP_HEADER_LEN-VPN_HEADER_LEN) as i32 + IP_HEADER_LEN as i32;
+                    // pkt_lengths.push(second_fragment_len);
+                    count += 1;
+                } else if length > (IP_HEADER_LEN + MIN_PAYLOAD_LEN) as i32 {
+                    pkt_lengths.push(length);
+                    count += 1;
+                }
+            } else {
+                println!("Error: Failed to parse i32");
+            }
+        } else {
+            println!("Error: Missing csv field");
+        }
+    }
+
+    pkt_lengths
+}
+
+fn encode_sequence_num(arr: &mut Vec<u8>, seq: usize) {
     // Encode as 32bit integer -> 4 bytes
     arr[IP_HEADER_LEN] = ((seq >> 56) & 0xFF) as u8;
     arr[IP_HEADER_LEN+1] = ((seq >> 48) & 0xFF) as u8;
