@@ -1,0 +1,28 @@
+# IP addresses used by VPN
+[ip]
+src="10.7.0.4"
+dst="10.7.0.1"
+
+# If CPU isolation is used
+# Core number don't matter if no isolation
+[isolation]
+priority=99
+isolate_send=false 
+core_send=0
+isolate_receive=false
+core_receive=1
+
+[interface]
+input='eth1'
+output='eth3'
+
+#Other parameters
+[general]
+pps=1e2
+num_pkts=170000
+save=true
+send=true
+receive=false
+log=false
+dataset=''
+
