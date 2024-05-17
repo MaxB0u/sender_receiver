@@ -17,7 +17,6 @@ use toml::Value;
 use std::fs::File;
 
 
-const MIN_ETH_LEN: i32 = 64;
 const MTU: usize = 1500;
 const EMPTY_PKT: [u8; MTU] = [0; MTU];
 const SAFETY_BUFFER: f64 = 0.0;
@@ -32,6 +31,11 @@ const IP_DST_ADDR_OFFSET: usize = 16;
 const IP_ADDR_LEN: usize = 4;
 const IP_VERSION: u8 = 4;
 const IP_ADDR_LISTEN_TO: [u8;4] = [10,7,0,4];
+
+const AVG_CAIDA_LEN: f64 = 900.0;
+const FACTOR_MEGABITS: f64 = 1e6;
+const BITS_PER_BYTE: f64 = 8.0;
+const WRAP_AND_WIREGUARD_OVERHAD: f64 = 100.0;
 
 struct ChannelCustom {
     tx: Box<dyn datalink::DataLinkSender>,
@@ -48,13 +52,26 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
         Err(_) => 0_u8,
     };
 
-    let pps = settings["general"]["pps"].as_float().expect("PPS setting not found");
+    let rate = settings["general"]["rate"].as_float().expect("Rate setting not found");
+    let sending_time = settings["general"]["time"].as_float().expect("Sending time setting not found");
     let save_data = settings["general"]["save"].as_bool().expect("Save setting not found");
     let is_sender = settings["general"]["send"].as_bool().expect("Send setting not found");
     let is_receiver = settings["general"]["receive"].as_bool().expect("Receive setting not found");
-    let num_pkts = settings["general"]["num_pkts"].as_integer().expect("Num pkts setting not found") as usize;
     let is_log = settings["general"]["log"].as_bool().expect("Is log setting not found");
     let dataset = settings["general"]["dataset"].as_str().expect("Dataset setting not found").to_string();
+
+    let mut avg_len = 0.0;
+    if dataset == "" {
+        // Uniform
+        let max_len = (MTU - IP_HEADER_LEN - VPN_HEADER_LEN) as f64;
+        let min_len = (IP_HEADER_LEN + MIN_PAYLOAD_LEN) as f64;
+        avg_len = (max_len + min_len) / 2.0 + WRAP_AND_WIREGUARD_OVERHAD;  
+    } else if dataset == "caida" {
+        avg_len = AVG_CAIDA_LEN + WRAP_AND_WIREGUARD_OVERHAD;
+    }
+
+    let pps = rate / avg_len * FACTOR_MEGABITS / BITS_PER_BYTE;
+    let num_pkts = (pps * sending_time) as usize;
 
     let ip_src = parse_ip(settings["ip"]["src"].as_str().expect("Src ip address not found").to_string());
     let ip_dst = parse_ip(settings["ip"]["dst"].as_str().expect("Dst ip address not found").to_string());
@@ -356,49 +373,12 @@ fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4], flow: u8, pkt_len: usize) ->
     ip_buff
 }
 
-// fn get_eth_frames(flow: u8) -> Vec<Vec<u8>> {
-//     let dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, flow);
-//     let src_mac = MacAddr::new(0x05, 0x04, 0x03, 0x02, 0x01, 0x00);
-//     let mut frame_buff: Vec<Vec<u8>> = Vec::new();
-//     for _ in 0..NUM_PACKETS as i32 {
-//         let length = get_random_pkt_len() as usize;
-//         let mut eth_buff = EMPTY_PKT[0..length].to_vec();
-//         let mut eth_pkt = ethernet::MutableEthernetPacket::new(&mut eth_buff).unwrap();
-//         eth_pkt.set_source(src_mac);
-//         eth_pkt.set_destination(dst_mac);
-//         eth_pkt.set_ethertype(ethernet::EtherType::new(length as u16));
-
-//         frame_buff.push(eth_buff);
-//     }
-//     //println!("{:?}", frame_buff[0]);
-//     frame_buff
-// }
-
-// fn get_perfect_frames(pattern: Vec<u16>) -> Vec<Vec<u8>>{
-//     let dst_mac = MacAddr::new(0x00, 0x01, 0x02, 0x03, 0x04, 0x05);
-//     let src_mac = MacAddr::new(0x05, 0x04, 0x03, 0x02, 0x01, 0x00);
-//     let mut frame_buff: Vec<Vec<u8>> = Vec::new();
-//     for i in 0..NUM_PACKETS as usize {
-//         let length = pattern[i % pattern.len()] as usize;
-//         let mut eth_buff = EMPTY_PKT[0..length].to_vec();
-//         let mut eth_pkt = ethernet::MutableEthernetPacket::new(&mut eth_buff).unwrap();
-//         eth_pkt.set_source(src_mac);
-//         eth_pkt.set_destination(dst_mac);
-//         eth_pkt.set_ethertype(ethernet::EtherType::new(length as u16));
-
-//         //frame_buff.push(eth_buff.clone());
-//         frame_buff.push(eth_buff);
-//     }
-//     //println!("{:?}", frame_buff[0]);
-//     frame_buff
-// }
-
 fn get_random_pkt_lengths(num_pkts: usize) -> Vec<i32> {
     let mut rng = rand::thread_rng();
     let mut pkt_lengths = Vec::with_capacity(num_pkts);
 
     for _ in 0..num_pkts {
-        pkt_lengths.push(rng.gen_range(MIN_ETH_LEN..=(MTU-IP_HEADER_LEN-VPN_HEADER_LEN) as i32));
+        pkt_lengths.push(rng.gen_range((IP_HEADER_LEN+MIN_PAYLOAD_LEN) as i32..=(MTU-IP_HEADER_LEN-VPN_HEADER_LEN) as i32));
     }
     
     pkt_lengths

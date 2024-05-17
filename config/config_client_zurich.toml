@@ -18,11 +18,11 @@ output='ens39'
 
 #Other parameters
 [general]
-pps=17000.0
-num_pkts=170000
+rate=100.0 #Mbps
+sending_time=10.0 #In sec
 save=true
 send=true
 receive=false
 log=false
-dataset='caida'
+dataset=''
 
