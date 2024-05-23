@@ -14,14 +14,15 @@ core_receive=1
 
 [interface]
 input='eth0'
-output='wg3'
+output='eth1'
 
 #Other parameters
 [general]
-pps=100.0
-num_pkts=1000
+rate=1.0
+time=10.0 #In sec
 save=true
 send=false
 receive=true
 log=false
+dataset=''
 

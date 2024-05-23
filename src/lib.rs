@@ -276,7 +276,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize, sav
     let mut last_msg_time = Instant::now();
     let mut count: usize = 0;
 
-    println!("Receiving...");
+    println!("Receiving {}pkt...", num_pkts);
     while count < num_pkts as usize {
     // loop {
         match ch_rx.rx.next() {
