@@ -387,7 +387,7 @@ fn get_random_pkt_lengths(num_pkts: usize) -> Vec<i32> {
 }
 
 fn get_caida_lengths(num_pkts: usize) -> Vec<i32> {
-    let filename = "../analysis/caida_lengths_small.csv";
+    let filename = "../caida/caida_lengths_small.csv";
 
     let file = File::open(filename).expect("Error opening caida length file");
     let reader = BufReader::new(file);
