@@ -7,10 +7,10 @@ dst="10.7.0.1"
 # Core number don't matter if no isolation
 [isolation]
 priority=99
-isolate_send=false 
-core_send=0
-isolate_receive=false
-core_receive=1
+isolate_sender=false 
+core_sender=0
+isolate_receiver=false
+core_receiver=1
 
 [interface]
 input='ens38'

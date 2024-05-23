@@ -78,11 +78,11 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     let ip_src = parse_ip(settings["ip"]["src"].as_str().expect("Src ip address not found").to_string());
     let ip_dst = parse_ip(settings["ip"]["dst"].as_str().expect("Dst ip address not found").to_string());
     
-    let is_send_isolated = settings["isolation"]["isolate_send"].as_bool().expect("Isolate send setting not found");  
-    let core_id_send = settings["isolation"]["core_send"].as_integer().expect("Core send setting not found") as usize;
+    let is_send_isolated = settings["isolation"]["isolate_sender"].as_bool().expect("Isolate send setting not found");  
+    let core_id_send = settings["isolation"]["core_sender"].as_integer().expect("Core send setting not found") as usize;
 
-    let is_receive_isolated = settings["isolation"]["isolate_receive"].as_bool().expect("Isolate receive setting not found");     
-    let core_id_receive = settings["isolation"]["core_receive"].as_integer().expect("Core receive setting not found") as usize;
+    let is_receive_isolated = settings["isolation"]["isolate_receiver"].as_bool().expect("Isolate receive setting not found");     
+    let core_id_receive = settings["isolation"]["core_receiver"].as_integer().expect("Core receive setting not found") as usize;
 
     let priority = settings["isolation"]["priority"].as_integer().expect("Thread priority setting not found") as i32; 
 
