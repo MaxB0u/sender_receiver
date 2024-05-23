@@ -18,8 +18,8 @@ output='ens39'
 
 #Other parameters
 [general]
-rate=100.0 #Mbps
-sending_time=10.0 #In sec
+rate=10.0
+time=10.0 #In sec
 save=true
 send=true
 receive=false

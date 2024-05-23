@@ -66,12 +66,14 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
         let max_len = (MTU - IP_HEADER_LEN - VPN_HEADER_LEN) as f64;
         let min_len = (IP_HEADER_LEN + MIN_PAYLOAD_LEN) as f64;
         avg_len = (max_len + min_len) / 2.0 + WRAP_AND_WIREGUARD_OVERHAD;  
+        println!("Average packet length of {}B", avg_len);
     } else if dataset == "caida" {
         avg_len = AVG_CAIDA_LEN + WRAP_AND_WIREGUARD_OVERHAD;
     }
 
     let pps = rate / avg_len * FACTOR_MEGABITS / BITS_PER_BYTE;
     let num_pkts = (pps * sending_time) as usize;
+    println!("Sending {}pkts at {}pps", num_pkts, pps);
 
     let ip_src = parse_ip(settings["ip"]["src"].as_str().expect("Src ip address not found").to_string());
     let ip_dst = parse_ip(settings["ip"]["dst"].as_str().expect("Dst ip address not found").to_string());
@@ -242,7 +244,6 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
 
         // Calculate time to sleep
         let elapsed_time = last_iteration_time.elapsed();
-        last_iteration_time = Instant::now();
         let sleep_time = if elapsed_time < interval {
             interval - elapsed_time
         } else {
@@ -250,6 +251,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
         };
         // Sleep for the remaining time until the next iteration
         thread::sleep(sleep_time);
+        last_iteration_time = last_iteration_time + interval;
     }
 }
 
