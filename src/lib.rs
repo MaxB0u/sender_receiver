@@ -30,7 +30,6 @@ const IP_SRC_ADDR_OFFSET: usize = 12;
 const IP_DST_ADDR_OFFSET: usize = 16;
 const IP_ADDR_LEN: usize = 4;
 const IP_VERSION: u8 = 4;
-const IP_ADDR_LISTEN_TO: [u8;4] = [10,7,0,4];
 
 const AVG_CAIDA_LEN: f64 = 900.0;
 const FACTOR_MEGABITS: f64 = 1e6;
@@ -112,7 +111,7 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-            receive(&output, receiver, pps, num_pkts, save_data);
+            receive(&output, receiver, pps, num_pkts, ip_src, save_data);
         });
 
         recv_handle.join().expect("Receiving thread panicked");
@@ -255,7 +254,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
     }
 }
 
-fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize, save_data: bool) {
+fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize,  ip_src: [u8;4], save_data: bool) {
     let mut ch_rx = match get_channel(output) {
         Ok(rx) => rx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -284,7 +283,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize, sav
         match ch_rx.rx.next() {
             // process_packet(packet, &mut scheduler),
             Ok(pkt) =>  {
-                if is_ip_addr_matching(pkt, false) { 
+                if is_ip_addr_matching(pkt, ip_src ,false) { 
                     let seq = decode_sequence_num(pkt);
                     let mismatch = seq.abs_diff(count);
                     // println!("{seq}");
@@ -462,15 +461,15 @@ fn decode_sequence_num(arr: &[u8]) -> usize {
 //     dst_addr == expected_dst_mac
 // }
 
-fn is_ip_addr_matching(buff: &[u8], is_dest: bool) -> bool {
+fn is_ip_addr_matching(buff: &[u8], ip_addr: [u8;4], is_dest: bool) -> bool {
     // let pkt = ipv4::Ipv4Packet::new(buff).unwrap();
     // let dst_addr = pkt.get_destination();
     // println!("{}, {}", dst_addr, net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3]));
     // dst_addr == net::Ipv4Addr::new(DST_IP_ADDR[0], DST_IP_ADDR[1], DST_IP_ADDR[2], DST_IP_ADDR[3])
     if is_dest {
-        buff[IP_DST_ADDR_OFFSET..IP_DST_ADDR_OFFSET+IP_ADDR_LEN] == IP_ADDR_LISTEN_TO
+        buff[IP_DST_ADDR_OFFSET..IP_DST_ADDR_OFFSET+IP_ADDR_LEN] == ip_addr
     } else {
-        buff[IP_SRC_ADDR_OFFSET..IP_SRC_ADDR_OFFSET+IP_ADDR_LEN] == IP_ADDR_LISTEN_TO
+        buff[IP_SRC_ADDR_OFFSET..IP_SRC_ADDR_OFFSET+IP_ADDR_LEN] == ip_addr
     }
 }
 

@@ -1,6 +1,6 @@
 # IP addresses used by VPN
 [ip]
-src='10.7.0.4'
+src='10.7.0.3'
 dst='10.7.0.1'
 
 # If CPU isolation is used
