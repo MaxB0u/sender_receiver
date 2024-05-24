@@ -280,10 +280,11 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize,  ip
     println!("Receiving {}pkt...", num_pkts);
     while count < num_pkts as usize {
     // loop {
+        // println!("{}", count);
         match ch_rx.rx.next() {
             // process_packet(packet, &mut scheduler),
             Ok(pkt) =>  {
-                if is_ip_addr_matching(pkt, ip_src ,false) { 
+                if is_ip_addr_matching(pkt, ip_src ,true) { 
                     let seq = decode_sequence_num(pkt);
                     let mismatch = seq.abs_diff(count);
                     // println!("{seq}");
