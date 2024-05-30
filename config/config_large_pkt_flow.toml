@@ -1,0 +1,29 @@
+# IP addresses used by VPN
+[ip]
+src='10.7.0.2'
+dst='10.7.0.1'
+
+# If CPU isolation is used
+# Core number don't matter if no isolation
+[isolation]
+priority=99
+isolate_sender=false 
+core_sender=0
+isolate_receiver=false
+core_receiver=1
+
+[interface]
+input='wg3'
+output='ens39'
+
+#Other parameters
+[general]
+rate=70.0
+time=15.0 #In sec
+save=true
+send=true
+receive=false
+log=false
+dataset='caida'
+min_pkt_length=934
+max_pkt_length=1400

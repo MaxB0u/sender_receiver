@@ -41,6 +41,25 @@ struct ChannelCustom {
     rx: Box<dyn datalink::DataLinkReceiver>,
 }
 
+struct SenderConfig {
+    pps: f64,
+    ip_src: [u8;4], 
+    ip_dst: [u8;4], 
+    num_pkts: usize, 
+    save_data: bool, 
+    flow: u8, 
+    dataset: String, 
+    min_pkt_length: usize, 
+    max_pkt_length: usize,
+}
+
+struct ReceiverConfig {
+    pps: f64,
+    ip_src: [u8;4], 
+    num_pkts: usize, 
+    save_data: bool, 
+}
+
 pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     // Channel to communicate data on it
     let (sender, receiver) = mpsc::channel();
@@ -60,12 +79,26 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     let dataset = settings["general"]["dataset"].as_str().expect("Dataset setting not found").to_string();
 
     let mut avg_len = 0.0;
+    let mut max_pkt_length = 0;
+    let mut min_pkt_length = 0;
     if dataset == "" {
         // Uniform
         let max_len = (MTU - IP_HEADER_LEN - VPN_HEADER_LEN) as f64;
         let min_len = (IP_HEADER_LEN + MIN_PAYLOAD_LEN) as f64;
         avg_len = (max_len + min_len) / 2.0 + WRAP_AND_WIREGUARD_OVERHAD;  
         println!("Average packet length of {}B", avg_len);
+
+        // If pkt lengths are specified get them here. They are not taken into account for the avg length, 
+        // because they should not modify the pps
+        min_pkt_length = match settings["general"]["min_pkt_length"].as_integer() {
+            Some(v) => v as usize,
+            None => 0,
+        };
+        max_pkt_length = match settings["general"]["max_pkt_length"].as_integer() {
+            Some(v) => v as usize,
+            None => 0,
+        };
+
     } else if dataset == "caida" {
         avg_len = AVG_CAIDA_LEN + WRAP_AND_WIREGUARD_OVERHAD;
     }
@@ -97,21 +130,28 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     if is_receiver {
         // Spawn thread for receiving packets
         let recv_handle = thread::spawn(move || {
-        if is_receive_isolated {
-            unsafe {
-                let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
-                libc::CPU_SET(core_id_receive, &mut cpuset);
-                libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), &cpuset);
+            if is_receive_isolated {
+                unsafe {
+                    let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
+                    libc::CPU_SET(core_id_receive, &mut cpuset);
+                    libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), &cpuset);
 
-                let thread =  libc::pthread_self();
-                let param = libc::sched_param { sched_priority: priority };
-                let result = libc::pthread_setschedparam(thread, libc::SCHED_FIFO, &param as *const libc::sched_param);
-                if result != 0 {
-                    panic!("Failed to set thread priority");
+                    let thread =  libc::pthread_self();
+                    let param = libc::sched_param { sched_priority: priority };
+                    let result = libc::pthread_setschedparam(thread, libc::SCHED_FIFO, &param as *const libc::sched_param);
+                    if result != 0 {
+                        panic!("Failed to set thread priority");
+                    }
                 }
             }
-        }
-            receive(&output, receiver, pps, num_pkts, ip_src, save_data);
+
+            let config = ReceiverConfig {
+                pps,
+                ip_src, 
+                num_pkts, 
+                save_data, 
+            };
+            receive(&output, receiver, config);
         });
 
         recv_handle.join().expect("Receiving thread panicked");
@@ -135,7 +175,19 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            send(&input, sender, pps, ip_src, ip_dst, num_pkts, save_data, flow, dataset);
+            let config = SenderConfig {
+                pps,
+                ip_src, 
+                ip_dst, 
+                num_pkts, 
+                save_data, 
+                flow, 
+                dataset, 
+                min_pkt_length, 
+                max_pkt_length,
+            };
+
+            send(&input, sender, config);
         });
         // Wait 1s before tsarting to send
         thread::sleep(Duration::new(1, 0));
@@ -170,7 +222,7 @@ fn get_channel(interface_name: &str) -> Result<ChannelCustom, &'static str>{
     Ok(ch)
 }
 
-fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;4], num_pkts: usize, save_data: bool, flow: u8, dataset: String) {
+fn send(input: &str, sender: Sender<i64>, config: SenderConfig) {
     let mut ch_tx = match get_channel(input) {
         Ok(tx) => tx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -178,12 +230,12 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
 
     let mut file = OpenOptions::new()
         .write(true)
-        .truncate(save_data) // Overwrite
+        .truncate(config.save_data) // Overwrite
         .create(true)
-        .open(format!("tx_data_{}.csv", flow))
+        .open(format!("tx_data_{}.csv", config.flow))
         .expect("Could not open file");
 
-    if save_data {
+    if config.save_data {
         writeln!(file, "Seq,Time,Flow").expect("Failed to write to file");
     }
 
@@ -193,22 +245,22 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
     let delays = vec![0; 1e6 as usize];
 
     //let interval = Duration::from_micros((1e6/pps) as u64);
-    let interval = Duration::from_nanos((1e9/pps + SAFETY_BUFFER) as u64);
+    let interval = Duration::from_nanos((1e9/config.pps + SAFETY_BUFFER) as u64);
     //let interval = Duration::from_nanos(SLEEP_TIME);
     let mut last_iteration_time = Instant::now();
     // let mut last_msg_time = Instant::now();
 
     let lengths;
-    if dataset == "caida" {
-        lengths = get_caida_lengths(num_pkts);
+    if config.dataset == "caida" {
+        lengths = get_caida_lengths(config.num_pkts);
     } else {
-        lengths = get_random_pkt_lengths(num_pkts);
+        lengths = get_random_pkt_lengths(config.num_pkts, config.min_pkt_length, config.max_pkt_length);
     }
 
     println!("Sending...");
-    while count < num_pkts {
+    while count < config.num_pkts {
     //loop {
-        let frame = &mut get_ipv4_packet(ip_src, ip_dst, flow, lengths[count] as usize);
+        let frame = &mut get_ipv4_packet(config.ip_src, config.ip_dst, config.flow, lengths[count] as usize);
         // println!("{:?}", frame);
         encode_sequence_num(  frame, count);
         // println!("{}", frame.len());
@@ -224,14 +276,14 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
             }
         }
 
-        if save_data && count < delays.len() {
+        if config.save_data && count < delays.len() {
             // Move this to the end if too unefficient
             let current_time = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap();
-            writeln!(file, "{},{},{}", count, current_time.as_nanos(), flow).expect("Failed to write to file");
+            writeln!(file, "{},{},{}", count, current_time.as_nanos(), config.flow).expect("Failed to write to file");
             //delays[count as usize] = elapsed_time.as_nanos()
         }
 
-        if count % (pps * NUM_SEC_BW_UPDATES) as usize == 0 && count < num_pkts {
+        if count % (config.pps * NUM_SEC_BW_UPDATES) as usize == 0 && count < config.num_pkts {
             // let seq = decode_sequence_num(frame);
             // println!("Sending {} of length {}", seq, frame.len());
             sender.send(count as i64).unwrap();
@@ -254,7 +306,7 @@ fn send(input: &str, sender: Sender<i64>, pps: f64, ip_src: [u8;4], ip_dst: [u8;
     }
 }
 
-fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize,  ip_src: [u8;4], save_data: bool) {
+fn receive(output: &str, receiver: Receiver<i64>, config: ReceiverConfig) {
     let mut ch_rx = match get_channel(output) {
         Ok(rx) => rx,
         Err(error) => panic!("Error getting channel: {error}"),
@@ -262,12 +314,12 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize,  ip
 
     let mut file = OpenOptions::new()
         .write(true)
-        .truncate(save_data) // Overwrite
+        .truncate(config.save_data) // Overwrite
         .create(true)
         .open("rx_data.csv")
         .expect("Could not open file");
 
-    if save_data {
+    if config.save_data {
         writeln!(file, "Seq,Time,Flow").expect("Failed to write to file");
     }
 
@@ -277,14 +329,14 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize,  ip
     let mut last_msg_time = Instant::now();
     let mut count: usize = 0;
 
-    println!("Receiving {}pkt...", num_pkts);
-    while count < num_pkts as usize {
+    println!("Receiving {}pkt...", config.num_pkts);
+    while count < config.num_pkts as usize {
     // loop {
         // println!("{}", count);
         match ch_rx.rx.next() {
             // process_packet(packet, &mut scheduler),
             Ok(pkt) =>  {
-                if is_ip_addr_matching(pkt, ip_src ,true) { 
+                if is_ip_addr_matching(pkt, config.ip_src ,true) { 
                     let seq = decode_sequence_num(pkt);
                     let mismatch = seq.abs_diff(count);
                     // println!("{seq}");
@@ -293,7 +345,7 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize,  ip
                         max_seq_mismatch = mismatch;
                     } 
 
-                    if save_data {
+                    if config.save_data {
                         // Move this to the end if too unefficient
                         let rx_time = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_nanos();
                         let rx_seq = seq;
@@ -319,8 +371,8 @@ fn receive(output: &str, receiver: Receiver<i64>, pps: f64, num_pkts: usize,  ip
         match receiver.try_recv() {
             Ok(num_pkts) => {
                 let latency_ratio = (num_pkts as f64 - count as f64) / num_pkts as f64;
-                let latency_time = last_msg_time.elapsed().as_nanos() as f64 * (latency_ratio / (pps * NUM_SEC_BW_UPDATES));
-                let latency_total = 1e3 * (num_pkts as f64 - count as f64) / (pps * NUM_SEC_BW_UPDATES);
+                let latency_time = last_msg_time.elapsed().as_nanos() as f64 * (latency_ratio / (config.pps * NUM_SEC_BW_UPDATES));
+                let latency_total = 1e3 * (num_pkts as f64 - count as f64) / (config.pps * NUM_SEC_BW_UPDATES);
                 let avg_reorder = 0;
                 if count > 0 {
                     // avg_reorder = total_seq_mismatch/count;
@@ -375,12 +427,26 @@ fn get_ipv4_packet( ip_src: [u8;4], ip_dst: [u8;4], flow: u8, pkt_len: usize) ->
     ip_buff
 }
 
-fn get_random_pkt_lengths(num_pkts: usize) -> Vec<i32> {
+fn get_random_pkt_lengths(num_pkts: usize, min_pkt_length: usize, max_pkt_length: usize) -> Vec<i32> {
+    let mut min_len = min_pkt_length;
+    if min_pkt_length < IP_HEADER_LEN+MIN_PAYLOAD_LEN || min_pkt_length == 0 {
+        min_len = IP_HEADER_LEN+MIN_PAYLOAD_LEN;
+    }
+    println!("Min pkt length is {} bytes", min_len);
+
+    let mut max_len = max_pkt_length;
+    if max_pkt_length > MTU-IP_HEADER_LEN-VPN_HEADER_LEN || max_pkt_length == 0 {
+        max_len = MTU-IP_HEADER_LEN-VPN_HEADER_LEN;
+    }
+    println!("Max pkt length is {} bytes", max_len);
+
+    assert!(min_len <= max_len);
+
     let mut rng = rand::thread_rng();
     let mut pkt_lengths = Vec::with_capacity(num_pkts);
 
     for _ in 0..num_pkts {
-        pkt_lengths.push(rng.gen_range((IP_HEADER_LEN+MIN_PAYLOAD_LEN) as i32..=(MTU-IP_HEADER_LEN-VPN_HEADER_LEN) as i32));
+        pkt_lengths.push(rng.gen_range(min_len as i32..=max_len as i32));
     }
     
     pkt_lengths
