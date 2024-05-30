@@ -13,16 +13,17 @@ isolate_receiver=false
 core_receiver=1
 
 [interface]
-input='wg3'
+input='eth0'
 output='ens39'
 
 #Other parameters
 [general]
-rate=75.0
+rate=1.0
 time=15.0 #In sec
 save=true
 send=true
 receive=false
 log=false
-dataset='caida'
-
+dataset=''
+min_pkt_length=0
+max_pkt_length=0

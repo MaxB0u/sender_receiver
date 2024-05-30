@@ -25,4 +25,5 @@ send=true
 receive=false
 log=false
 dataset=''
-
+min_pkt_length=0
+max_pkt_length=0

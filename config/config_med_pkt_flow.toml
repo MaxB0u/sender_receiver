@@ -13,12 +13,12 @@ isolate_receiver=false
 core_receiver=1
 
 [interface]
-input='wg3'
+input='eth0'
 output='ens39'
 
 #Other parameters
 [general]
-rate=70.0
+rate=23.333
 time=15.0 #In sec
 save=true
 send=true

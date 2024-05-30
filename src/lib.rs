@@ -79,25 +79,15 @@ pub fn run(settings: Value) -> Result<(), Box<dyn Error>> {
     let dataset = settings["general"]["dataset"].as_str().expect("Dataset setting not found").to_string();
 
     let mut avg_len = 0.0;
-    let mut max_pkt_length = 0;
-    let mut min_pkt_length = 0;
+    let min_pkt_length = settings["general"]["min_pkt_length"].as_integer().expect("Min pkt length setting not found") as usize;
+    let max_pkt_length = settings["general"]["max_pkt_length"].as_integer().expect("Max pkt length setting not found") as usize;
+
     if dataset == "" {
         // Uniform
         let max_len = (MTU - IP_HEADER_LEN - VPN_HEADER_LEN) as f64;
         let min_len = (IP_HEADER_LEN + MIN_PAYLOAD_LEN) as f64;
         avg_len = (max_len + min_len) / 2.0 + WRAP_AND_WIREGUARD_OVERHAD;  
         println!("Average packet length of {}B", avg_len);
-
-        // If pkt lengths are specified get them here. They are not taken into account for the avg length, 
-        // because they should not modify the pps
-        min_pkt_length = match settings["general"]["min_pkt_length"].as_integer() {
-            Some(v) => v as usize,
-            None => 0,
-        };
-        max_pkt_length = match settings["general"]["max_pkt_length"].as_integer() {
-            Some(v) => v as usize,
-            None => 0,
-        };
 
     } else if dataset == "caida" {
         avg_len = AVG_CAIDA_LEN + WRAP_AND_WIREGUARD_OVERHAD;
